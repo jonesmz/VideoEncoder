@@ -21,4 +21,10 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 ##
+##
+# Mark this directory and all scoped subdirectories as "SYSTEM" directories to try to squash warnings
+# This property should mark all targets created in this directory and subdirs as third party code.
+##
+set_directory_properties(PROPERTIES SYSTEM TRUE)
+
 add_subdirectory(rapidyaml)

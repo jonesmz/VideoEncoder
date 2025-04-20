@@ -24,18 +24,16 @@
 #include "string_concat.h"
 
 // <ryml_std.hpp> is only needed if interop with std types is desired.
-// ryml itself does not use any STL container.
+//  ryml itself does not use any STL container.
 #include <ryml_std.hpp> // optional header. BUT when used, needs to be included BEFORE ryml.hpp
 #include <ryml.hpp>
 
 #include <boost/program_options.hpp>
 
 #include <string>
-#include <cstdio>
 #include <random>
 #include <memory>
 #include <vector>
-#include <cstdint>
 #include <sstream>
 #include <fstream>
 #include <iostream>
@@ -44,58 +42,19 @@
 #include <filesystem>
 #include <string_view>
 
+#include <cstdio>
+#include <cstdint>
+
 namespace po = boost::program_options;
 
-static constexpr auto sc_commandPrefix ="#!/bin/sh\nset -v\nset -x";
+static constexpr auto sc_commandPrefix ="#!/bin/sh\nset -v\nset -x\n";
 
 // sc_commandPrefix and sc_commandSuffix must be concatinated
 // with a string that defines the bash variables INPUT, OUTPUT, and ARGS
 // Note the newline at the beginning of sc_commandSuffix!!!
 static constexpr auto sc_commandSuffix =
 R"(
-
-# Read only variables that contain UUIDs to help ensure no conflict for extended attribute names.
-CLI_ARGS_MD5_UUID="2BC44991_B9F7_4DA9_97D6_143A1C087A54"
-SELF_FILE_MD5_UUID="FE8954C1_37B5_4784_B725_C3DF127C8BD7"
-INPUT_FILE_MD5_UUID="8DE5FF00_C2B2_4631_BB73_1AEFA1954DA8"
-if [ ! -f "$INPUT" ]
-then
-    exit -1;
-fi
-
-if [ ! -f "$OUTPUT" ]
-then
-    OUTPUTDIR=$(dirname "$OUTPUT")
-    mkdir -p "$OUTPUTDIR"
-    touch "$OUTPUT"
-fi
-
-if ! INPUT_FILE_MD5SUM=$(getfattr --only-values --name="user.self_md5sum_$SELF_FILE_MD5_UUID" "$INPUT" 2>/dev/null)
-then
-    INPUT_FILE_MD5SUM=$(md5sum "$INPUT" | cut -f1 -d' ')
-    setfattr --name="user.self_md5sum_$SELF_FILE_MD5_UUID" --value "$INPUT_FILE_MD5SUM" "$INPUT"
-fi
-CLI_ARGS_MD5SUM=$(echo "$PRESET $ARGS" | md5sum | cut -f1 -d' ')
-
-DEST_CLI_ARGS_MD5SUM=$(getfattr --only-values --name="user.cli_args_md5sum_$CLI_ARGS_MD5_UUID" "$OUTPUT")
-DEST_INPUT_FILE_MD5SUM=$(getfattr --only-values --name="user.input_file_md5sum_$INPUT_FILE_MD5_UUID" "$OUTPUT")
-if  [ " $CLI_ARGS_MD5SUM "   == " $DEST_CLI_ARGS_MD5SUM " ] &&
-    [ " $INPUT_FILE_MD5SUM " == " $DEST_INPUT_FILE_MD5SUM " ]
-then
-    return 0
-fi
-
-rm "$OUTPUT"
-
-HandBrakeCLI --output "$OUTPUT" --input "$INPUT" --preset "$PRESET" $ARGS
-
-if [ $? -eq 0 ]
-then
-    setfattr --name="user.cli_args_md5sum_$CLI_ARGS_MD5_UUID" --value "$CLI_ARGS_MD5SUM" "$OUTPUT"
-    setfattr --name="user.input_file_md5sum_$INPUT_FILE_MD5_UUID" --value "$INPUT_FILE_MD5SUM" "$OUTPUT"
-else
-    exit -1
-fi
+    #include "cmd_suffix.sh"
 )";
 
 
@@ -122,7 +81,7 @@ std::map<std::filesystem::path, ryml::Tree> build_yaml_config_map(std::filesyste
         {
             std::ifstream t(itemPath);
             std::string const fileContents((std::istreambuf_iterator<char>(t)), std::istreambuf_iterator<char>());
-            auto tree = ryml::parse(ryml::to_csubstr(itemPath.generic_string()), ryml::to_csubstr(fileContents));
+            auto tree = ryml::parse_in_arena(ryml::to_csubstr(itemPath.generic_string()), ryml::to_csubstr(fileContents));
             auto const& [it, success] = configs.emplace(std::move(item), std::move(tree));
             if( ! success)
             {
@@ -198,32 +157,69 @@ void parse_yaml_config(std::filesystem::path const& source,
         std::string           topLevelName        = append_string_if_child_exists(topLevel, "Name",            std::string());
         std::string           topLevelEncodeOpts  = append_string_if_child_exists(topLevel, "EncodingOptions", std::string());
 
-        for(auto const& season : topLevel["Seasons"])
+        if(topLevel.has_child("Seasons"))
         {
-            std::filesystem::path seasonSource       = append_fspath_if_child_exists(season, "Source",          topLevelSource);
-            std::filesystem::path seasonDestination  = append_fspath_if_child_exists(season, "Destination",     topLevelDestination);
-            std::string           seasonName         = append_string_if_child_exists(season, "Name",            topLevelName);
-            std::string           seasonEncodeOpts   = append_string_if_child_exists(season, "EncodingOptions", topLevelEncodeOpts);
-
-            for(auto const& intakeFile : season["IntakeFiles"])
+            // YAML Layout for TV shows with seasons
+            for(auto const& season : topLevel["Seasons"])
             {
-                std::filesystem::path intakeFileSource      = append_fspath_if_child_exists(intakeFile, "Source",          seasonSource);
-                std::filesystem::path intakeFileDestination = append_fspath_if_child_exists(intakeFile, "Destination",     seasonDestination);
-                std::string           intakeFileName        = append_string_if_child_exists(intakeFile, "Name",            seasonName);
-                std::string           intakeFileEncodeOpts  = append_string_if_child_exists(intakeFile, "EncodingOptions", seasonEncodeOpts);
+                std::filesystem::path seasonSource       = append_fspath_if_child_exists(season, "Source",          topLevelSource);
+                std::filesystem::path seasonDestination  = append_fspath_if_child_exists(season, "Destination",     topLevelDestination);
+                std::string           seasonName         = append_string_if_child_exists(season, "Name",            topLevelName);
+                std::string           seasonEncodeOpts   = append_string_if_child_exists(season, "EncodingOptions", topLevelEncodeOpts);
 
-                for(auto const& episode : intakeFile["Episodes"])
+                for(auto const& intakeFile : season["IntakeFiles"])
                 {
+                    std::filesystem::path intakeFileSource      = append_fspath_if_child_exists(intakeFile, "Source",          seasonSource);
+                    std::filesystem::path intakeFileDestination = append_fspath_if_child_exists(intakeFile, "Destination",     seasonDestination);
+                    std::string           intakeFileName        = append_string_if_child_exists(intakeFile, "Name",            seasonName);
+                    std::string           intakeFileEncodeOpts  = append_string_if_child_exists(intakeFile, "EncodingOptions", seasonEncodeOpts);
 
-                    std::filesystem::path episodeSource      = append_fspath_if_child_exists(episode, "Source",          intakeFileSource);
-                    std::filesystem::path episodeDestination = append_fspath_if_child_exists(episode, "Destination",     intakeFileDestination);
-                    std::string           episodeEncodeOpts  = append_string_if_child_exists(episode, "EncodingOptions", intakeFileEncodeOpts);
-                    std::string           episodeName        = append_string_if_child_exists(episode, "Name",            intakeFileName);
-                    episodeDestination /= string_concat(episodeName, " - ", season["Season"].val(), episode["Episode"].val(), " - ", episode["Title"].val(), ".m4v");
+                    for(auto const& episode : intakeFile["Episodes"])
+                    {
 
-                    commands.emplace_back(std::move(episodeSource),
-                                          std::move(episodeDestination),
-                                          std::move(episodeEncodeOpts));
+                        std::filesystem::path episodeSource      = append_fspath_if_child_exists(episode, "Source",          intakeFileSource);
+                        std::filesystem::path episodeDestination = append_fspath_if_child_exists(episode, "Destination",     intakeFileDestination);
+                        std::string           episodeEncodeOpts  = append_string_if_child_exists(episode, "EncodingOptions", intakeFileEncodeOpts);
+                        std::string           episodeName        = append_string_if_child_exists(episode, "Name",            intakeFileName);
+                        episodeDestination /= string_concat(episodeName, " - ", season["Season"].val(), episode["Episode"].val(), " - ", episode["Title"].val(), ".m4v");
+
+                        commands.emplace_back(std::move(episodeSource),
+                                              std::move(episodeDestination),
+                                              std::move(episodeEncodeOpts));
+                    }
+                }
+            }
+        }
+
+        // Yaml layout for groupings of movies
+        if(topLevel.has_child("Movies"))
+        {
+            for(auto const& movie : topLevel["Movies"])
+            {
+                std::filesystem::path movieSource       = append_fspath_if_child_exists(movie, "Source",          topLevelSource);
+                std::filesystem::path movieDestination  = append_fspath_if_child_exists(movie, "Destination",     topLevelDestination);
+                std::string           movieName         = append_string_if_child_exists(movie, "Name",            topLevelName);
+                std::string           movieEncodeOpts   = append_string_if_child_exists(movie, "EncodingOptions", topLevelEncodeOpts);
+
+                for(auto const& intakeFile : movie["IntakeFiles"])
+                {
+                    std::filesystem::path intakeFileSource      = append_fspath_if_child_exists(intakeFile, "Source",          movieSource);
+                    std::filesystem::path intakeFileDestination = append_fspath_if_child_exists(intakeFile, "Destination",     movieDestination);
+                    std::string           intakeFileName        = append_string_if_child_exists(intakeFile, "Name",            movieName);
+                    std::string           intakeFileEncodeOpts  = append_string_if_child_exists(intakeFile, "EncodingOptions", movieEncodeOpts);
+
+                    for(auto const& output : intakeFile["Outputs"])
+                    {
+                        std::filesystem::path outputSource      = append_fspath_if_child_exists(output, "Source",          intakeFileSource);
+                        std::filesystem::path outputDestination = append_fspath_if_child_exists(output, "Destination",     intakeFileDestination);
+                        std::string           outputEncodeOpts  = append_string_if_child_exists(output, "EncodingOptions", intakeFileEncodeOpts);
+                        std::string           outputName        = append_string_if_child_exists(output, "Name",            intakeFileName);
+                        outputDestination /= string_concat(outputName, movie["Movie"].val(), ".m4v");
+
+                        commands.emplace_back(std::move(outputSource),
+                                              std::move(outputDestination),
+                                              std::move(outputEncodeOpts));
+                    }
                 }
             }
         }
